@@ -14,12 +14,12 @@
 </head>
 <body>
 <main class="app">
-  <header class="header"><h1>🛥️ 開船航跡紀錄</h1><p>開啟頁面後自動記錄移動路徑</p></header>
+  <header class="header"><h1>🛥️ 開船航跡紀錄</h1><p>定位顯示目前位置，航跡只在手動儲存時新增</p></header>
   <section class="card">
-    <div class="title-row"><div class="title">📍 目前位置／航跡地圖</div><div class="actions"><button class="btn btn-primary btn-small" onclick="centerOnCurrentLocation()">回到目前位置</button><button id="locationToggleBtn" class="btn btn-dark btn-small" onclick="toggleLocationTracking()">關閉定位更新</button></div></div>
+    <div class="title-row"><div class="title">📍 目前位置／航跡地圖</div><div class="actions"><button class="btn btn-primary btn-small" onclick="centerOnCurrentLocation()">回到目前位置</button><button id="locationToggleBtn" class="btn btn-dark btn-small" onclick="toggleAutoCenter()">自動回到位置：關</button></div></div>
     <div id="locationStatus" class="status"><strong>📡 定位更新已開啟</strong><br>正在取得手機位置…</div>
     <div id="map"></div>
-    <div class="hint">藍點為手機目前位置；航跡會在頁面開啟期間依移動自動記錄。iPhone 將網頁切到背景時，系統可能暫停定位。</div>
+    <div class="hint">藍點為手機目前位置。「自動回到位置」開啟時，每次開啟頁面取得首次定位後會置中一次；設定會保留。頁面開啟時會嘗試保持螢幕喚醒；iPhone 將網頁切到背景時，系統仍可能暫停定位。</div>
   </section>
   <section class="card">
     <div class="title">📝 手動記錄位置</div>
@@ -33,37 +33,38 @@
 </main>
 <script>
 const STORAGE_KEY='boat_route_records_v1';
-const AUTO_MIN_DISTANCE_METERS=8;
-const AUTO_MIN_INTERVAL_MS=5000;
+const AUTO_CENTER_ENABLED_KEY='boat_route_auto_center_enabled_v1';
 let routeRecords=[];
 let map,currentMarker,routeLine,pointLayer;
 let currentPosition=null;
 let watchId=null;
-let trackingEnabled=true;
+let autoCenterEnabled=true;
+let hasAutoCentered=false;
+let screenWakeLock=null;
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));}
 function formatTime(iso){const date=new Date(iso);return Number.isNaN(date.getTime())?'':date.toLocaleString('zh-TW',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});}
 function distanceMeters(a,b){const r=Math.PI/180,dLat=(b.lat-a.lat)*r,dLon=(b.lon-a.lon)*r,x=Math.sin(dLat/2)**2+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dLon/2)**2;return 6371000*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
-function loadRecords(){try{const saved=JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]');routeRecords=Array.isArray(saved)?saved.filter(r=>Number.isFinite(Number(r.lat))&&Number.isFinite(Number(r.lon))):[];}catch{routeRecords=[];}}
+function loadRecords(){try{const saved=JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]');routeRecords=Array.isArray(saved)?saved.filter(r=>r.type==='manual'&&Number.isFinite(Number(r.lat))&&Number.isFinite(Number(r.lon))):[];}catch{routeRecords=[];}}
 function saveRecords(){localStorage.setItem(STORAGE_KEY,JSON.stringify(routeRecords));}
+function loadSettings(){try{const saved=localStorage.getItem(AUTO_CENTER_ENABLED_KEY);autoCenterEnabled=saved===null?true:saved==='true';}catch{autoCenterEnabled=true;}}
 function initMap(){map=L.map('map',{zoomControl:true}).setView([23.7,121],7);L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);routeLine=L.polyline([],{color:'#38bdf8',weight:4,opacity:.85}).addTo(map);pointLayer=L.layerGroup().addTo(map);setTimeout(()=>map.invalidateSize(),80);}
 function renderMap(){routeLine.setLatLngs(routeRecords.map(r=>[r.lat,r.lon]));pointLayer.clearLayers();routeRecords.forEach((r,index)=>{const marker=L.circleMarker([r.lat,r.lon],{radius:r.type==='manual'?6:4,weight:2,color:'#fff',fillColor:r.type==='manual'?'#22c55e':'#38bdf8',fillOpacity:1}).addTo(pointLayer);marker.bindPopup(`<strong>${r.type==='manual'?'手動記錄':'自動航跡'}</strong><br>${esc(formatTime(r.savedAt))}<br>${Number(r.lat).toFixed(6)}, ${Number(r.lon).toFixed(6)}<br><button class="btn btn-dark btn-small" onclick="deleteRouteRecord('${esc(r.id)}')">刪除這筆</button>`);});}
 function renderList(){const list=document.getElementById('routeList');if(!routeRecords.length){list.innerHTML='<div class="empty">尚無移動紀錄。</div>';return;}list.innerHTML=[...routeRecords].reverse().map((r,reverseIndex)=>{const index=routeRecords.length-1-reverseIndex;return `<div class="route-item"><div class="route-main"><div class="route-title">${r.type==='manual'?'手動記錄':'自動航跡'}<span class="tag">第 ${index+1} 筆</span></div><div class="route-meta">${esc(formatTime(r.savedAt))}<br>${Number(r.lat).toFixed(6)}, ${Number(r.lon).toFixed(6)}${Number.isFinite(r.accuracy)?`｜精度約 ±${Math.round(r.accuracy)} m`:''}</div></div><button class="btn btn-danger btn-small" onclick="deleteRouteRecord('${esc(r.id)}')">刪除</button></div>`;}).join('');}
 function render(){renderMap();renderList();}
 function updateLocationStatus(message){document.getElementById('locationStatus').innerHTML=message;}
-function updateToggleButton(){const button=document.getElementById('locationToggleBtn');button.textContent=trackingEnabled?'關閉定位更新':'開啟定位更新';button.classList.toggle('btn-primary',trackingEnabled);button.classList.toggle('btn-dark',!trackingEnabled);}
+function updateToggleButton(){const button=document.getElementById('locationToggleBtn');button.textContent=`自動回到位置：${autoCenterEnabled?'開':'關'}`;button.classList.toggle('btn-primary',autoCenterEnabled);button.classList.toggle('btn-dark',!autoCenterEnabled);}
 function addRoutePoint(position,type){const record={id:`route_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,lat:Number(position.lat),lon:Number(position.lon),accuracy:position.accuracy??null,savedAt:new Date().toISOString(),type};routeRecords.push(record);routeRecords=routeRecords.slice(-5000);saveRecords();render();}
-function shouldAddAutoPoint(position){const last=routeRecords[routeRecords.length-1];if(!last)return true;const elapsed=Date.now()-new Date(last.savedAt).getTime();return elapsed>=AUTO_MIN_INTERVAL_MS&&distanceMeters(last,position)>=AUTO_MIN_DISTANCE_METERS;}
-function handlePosition(position){const lat=Number(position.coords.latitude),lon=Number(position.coords.longitude),accuracy=Number(position.coords.accuracy);if(!Number.isFinite(lat)||!Number.isFinite(lon))return;currentPosition={lat,lon,accuracy:Number.isFinite(accuracy)?accuracy:null};if(currentMarker)currentMarker.setLatLng([lat,lon]);else currentMarker=L.circleMarker([lat,lon],{radius:8,weight:3,color:'#e0f2fe',fillColor:'#2563eb',fillOpacity:1}).addTo(map).bindPopup('手機目前位置');const accuracyText=Number.isFinite(accuracy)?`｜精度約 ±${Math.round(accuracy)} m`:'';updateLocationStatus(`<strong>📡 定位更新已開啟</strong><br>${lat.toFixed(6)}, ${lon.toFixed(6)}${accuracyText}`);if(trackingEnabled&&shouldAddAutoPoint(currentPosition))addRoutePoint(currentPosition,'auto');}
+function handlePosition(position){const lat=Number(position.coords.latitude),lon=Number(position.coords.longitude),accuracy=Number(position.coords.accuracy);if(!Number.isFinite(lat)||!Number.isFinite(lon))return;currentPosition={lat,lon,accuracy:Number.isFinite(accuracy)?accuracy:null};if(currentMarker)currentMarker.setLatLng([lat,lon]);else currentMarker=L.circleMarker([lat,lon],{radius:8,weight:3,color:'#e0f2fe',fillColor:'#2563eb',fillOpacity:1}).addTo(map).bindPopup('手機目前位置');const accuracyText=Number.isFinite(accuracy)?`｜精度約 ±${Math.round(accuracy)} m`:'';updateLocationStatus(`<strong>📡 定位更新已開啟</strong><br>${lat.toFixed(6)}, ${lon.toFixed(6)}${accuracyText}`);if(autoCenterEnabled&&!hasAutoCentered){hasAutoCentered=true;centerOnCurrentLocation();}}
 function handleLocationError(error){const message={1:'定位權限被拒絕，請到瀏覽器設定允許位置權限。',2:'目前無法取得手機位置，請稍後再試。',3:'定位逾時，系統會持續嘗試。'}[error?.code]||'目前無法取得手機位置。';updateLocationStatus(`<strong>📡 定位更新已開啟</strong><br>${message}`);}
-function startLocationTracking(){if(!navigator.geolocation){trackingEnabled=false;updateToggleButton();updateLocationStatus('<strong>定位無法使用</strong><br>這個瀏覽器不支援手機定位。');return;}if(watchId!==null)return;watchId=navigator.geolocation.watchPosition(handlePosition,handleLocationError,{enableHighAccuracy:true,maximumAge:3000,timeout:20000});}
-function stopLocationTracking(){if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}updateLocationStatus('<strong>📡 定位更新已關閉</strong><br>保留最後位置與已記錄航跡。');}
-function toggleLocationTracking(){trackingEnabled=!trackingEnabled;if(trackingEnabled)startLocationTracking();else stopLocationTracking();updateToggleButton();}
+function startLocationTracking(){if(!navigator.geolocation){updateLocationStatus('<strong>定位無法使用</strong><br>這個瀏覽器不支援手機定位。');return;}if(watchId!==null)return;watchId=navigator.geolocation.watchPosition(handlePosition,handleLocationError,{enableHighAccuracy:true,maximumAge:3000,timeout:20000});}
+function toggleAutoCenter(){autoCenterEnabled=!autoCenterEnabled;localStorage.setItem(AUTO_CENTER_ENABLED_KEY,String(autoCenterEnabled));if(autoCenterEnabled&&currentPosition){hasAutoCentered=true;centerOnCurrentLocation();}updateToggleButton();}
+async function keepScreenAwake(){if(document.hidden||screenWakeLock||!('wakeLock' in navigator))return;try{screenWakeLock=await navigator.wakeLock.request('screen');screenWakeLock.addEventListener('release',()=>{screenWakeLock=null;});}catch{screenWakeLock=null;}}
 function centerOnCurrentLocation(){if(!currentPosition){alert('尚未取得手機目前位置。');return;}map.setView([currentPosition.lat,currentPosition.lon],16);}
 function saveManualPoint(){if(!currentPosition){alert('尚未取得手機目前位置，請稍後再試。');return;}addRoutePoint(currentPosition,'manual');alert('已記錄目前位置。');}
 function deleteRouteRecord(id){routeRecords=routeRecords.filter(r=>r.id!==id);saveRecords();render();}
 function clearRouteRecords(){if(!routeRecords.length)return;if(!confirm(`要刪除全部 ${routeRecords.length} 筆移動紀錄嗎？`))return;routeRecords=[];saveRecords();render();}
-loadRecords();initMap();render();updateToggleButton();startLocationTracking();
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&trackingEnabled&&watchId===null)startLocationTracking();});
+loadRecords();loadSettings();initMap();render();updateToggleButton();startLocationTracking();keepScreenAwake();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){if(watchId===null)startLocationTracking();keepScreenAwake();}});
 </script>
 </body>
 </html>
