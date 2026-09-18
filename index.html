@@ -23,7 +23,7 @@
 <main class="app">
   <header class="header"><h1>🛥️ 開船航跡紀錄</h1><p>定位顯示目前位置，航跡只在手動儲存時新增</p></header>
   <section class="card">
-    <div class="title-row"><div class="title">📍 目前位置／航跡地圖</div><div class="actions"><button class="btn btn-primary btn-small" onclick="centerOnCurrentLocation()">回到目前位置</button><button id="locationToggleBtn" class="btn btn-dark btn-small" onclick="toggleAutoCenter()">自動回到位置：關</button></div></div>
+    <div class="title-row"><div class="title">📍 目前位置／航跡地圖</div><div class="actions"><button class="btn btn-primary btn-small" onclick="centerOnCurrentLocation()">回到目前位置</button><button id="locationToggleBtn" class="btn btn-dark btn-small" onclick="toggleAutoCenter()">自動回到位置：關</button><button class="btn btn-dark btn-small" onclick="setMapNorthUp()">地圖朝北</button></div></div>
     <div id="locationStatus" class="status"><strong>📡 定位更新已開啟</strong><br>正在取得手機位置…</div>
     <div id="map"></div>
     <div class="hint">藍點為手機目前位置。「自動回到位置」開啟時，每次開啟頁面取得首次定位後會置中一次；設定會保留。頁面開啟時會嘗試保持螢幕喚醒；iPhone 將網頁切到背景時，系統仍可能暫停定位。</div>
@@ -50,7 +50,7 @@ let map,currentMarker,routeLine,pointLayer;
 let currentPosition=null;
 let watchId=null;
 let autoCenterEnabled=true;
-let hasAutoCentered=false;
+let autoCenterTimer=null;
 let screenWakeLock=null;
 let trackRecording=false;
 let trackStartedAt=null;
@@ -60,7 +60,7 @@ function formatTrackDistance(value){return value>=1000?`${(value/1000).toFixed(2
 function formatTrackTime(seconds){return `${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')}`;}
 function updateTrackPanel(){const elapsed=trackStartedAt?Math.floor((Date.now()-trackStartedAt)/1000):0;document.getElementById('trackDistance').textContent=formatTrackDistance(routeDistance());document.getElementById('trackDuration').textContent=formatTrackTime(elapsed);document.getElementById('trackPoints').textContent=routeRecords.length;const button=document.getElementById('trackingButton');button.textContent=trackRecording?'暫停記錄':'開始記錄';button.classList.toggle('is-running',trackRecording);}
 function toggleTrackRecording(){trackRecording=!trackRecording;if(trackRecording){if(!trackStartedAt)trackStartedAt=Date.now();if(currentPosition)addRoutePoint(currentPosition,'manual');keepScreenAwake();trackTimer=setInterval(updateTrackPanel,1000);}else if(trackTimer){clearInterval(trackTimer);trackTimer=null;}updateTrackPanel();}
-function shouldSaveLivePoint(){const last=routeRecords[routeRecords.length-1];return !last||!currentPosition||distanceMeters(last,currentPosition)>=8||Date.now()-new Date(last.savedAt).getTime()>=5000;}
+function shouldSaveLivePoint(){const last=routeRecords[routeRecords.length-1];return !last||!currentPosition||distanceMeters(last,currentPosition)>=20||Date.now()-new Date(last.savedAt).getTime()>=30000;}
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));}
 function formatTime(iso){const date=new Date(iso);return Number.isNaN(date.getTime())?'':date.toLocaleString('zh-TW',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});}
 function distanceMeters(a,b){const r=Math.PI/180,dLat=(b.lat-a.lat)*r,dLon=(b.lon-a.lon)*r,x=Math.sin(dLat/2)**2+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dLon/2)**2;return 6371000*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
@@ -78,19 +78,21 @@ function render(){renderMap();renderHistoryList();updateTrackPanel();}
 function updateLocationStatus(message){document.getElementById('locationStatus').innerHTML=message;}
 function updateToggleButton(){const button=document.getElementById('locationToggleBtn');button.textContent=`自動回到位置：${autoCenterEnabled?'開':'關'}`;button.classList.toggle('btn-primary',autoCenterEnabled);button.classList.toggle('btn-dark',!autoCenterEnabled);}
 function addRoutePoint(position,type){viewingHistoryId=null;const record={id:`route_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,lat:Number(position.lat),lon:Number(position.lon),accuracy:position.accuracy??null,savedAt:new Date().toISOString(),type};routeRecords.push(record);routeRecords=routeRecords.slice(-5000);saveRecords();render();}
-function handlePosition(position){const lat=Number(position.coords.latitude),lon=Number(position.coords.longitude),accuracy=Number(position.coords.accuracy);if(!Number.isFinite(lat)||!Number.isFinite(lon))return;currentPosition={lat,lon,accuracy:Number.isFinite(accuracy)?accuracy:null};if(currentMarker)currentMarker.setLatLng([lat,lon]);else currentMarker=L.circleMarker([lat,lon],{radius:8,weight:3,color:'#e0f2fe',fillColor:'#2563eb',fillOpacity:1}).addTo(map).bindPopup('手機目前位置');const accuracyText=Number.isFinite(accuracy)?`｜精度約 ±${Math.round(accuracy)} m`:'';updateLocationStatus(`<strong>📡 定位更新已開啟</strong><br>${lat.toFixed(6)}, ${lon.toFixed(6)}${accuracyText}`);if(trackRecording&&shouldSaveLivePoint())addRoutePoint(currentPosition,'manual');if(autoCenterEnabled&&!hasAutoCentered){hasAutoCentered=true;centerOnCurrentLocation();}}
+function handlePosition(position){const lat=Number(position.coords.latitude),lon=Number(position.coords.longitude),accuracy=Number(position.coords.accuracy);if(!Number.isFinite(lat)||!Number.isFinite(lon))return;currentPosition={lat,lon,accuracy:Number.isFinite(accuracy)?accuracy:null};if(currentMarker)currentMarker.setLatLng([lat,lon]);else currentMarker=L.circleMarker([lat,lon],{radius:8,weight:3,color:'#e0f2fe',fillColor:'#2563eb',fillOpacity:1}).addTo(map).bindPopup('手機目前位置');const accuracyText=Number.isFinite(accuracy)?`｜精度約 ±${Math.round(accuracy)} m`:'';updateLocationStatus(`<strong>📡 定位更新已開啟</strong><br>${lat.toFixed(6)}, ${lon.toFixed(6)}${accuracyText}`);if(trackRecording&&shouldSaveLivePoint())addRoutePoint(currentPosition,'manual');}
 function handleLocationError(error){const message={1:'定位權限被拒絕，請到瀏覽器設定允許位置權限。',2:'目前無法取得手機位置，請稍後再試。',3:'定位逾時，系統會持續嘗試。'}[error?.code]||'目前無法取得手機位置。';updateLocationStatus(`<strong>📡 定位更新已開啟</strong><br>${message}`);}
 function startLocationTracking(){if(!navigator.geolocation){updateLocationStatus('<strong>定位無法使用</strong><br>這個瀏覽器不支援手機定位。');return;}if(watchId!==null)return;watchId=navigator.geolocation.watchPosition(handlePosition,handleLocationError,{enableHighAccuracy:true,maximumAge:3000,timeout:20000});}
-function toggleAutoCenter(){autoCenterEnabled=!autoCenterEnabled;localStorage.setItem(AUTO_CENTER_ENABLED_KEY,String(autoCenterEnabled));if(autoCenterEnabled&&currentPosition){hasAutoCentered=true;centerOnCurrentLocation();}updateToggleButton();}
+function setMapNorthUp(){if(typeof map?.setBearing==='function')map.setBearing(0);map.invalidateSize();}
+function centerOnCurrentLocation(){if(currentPosition){setMapNorthUp();map.setView([currentPosition.lat,currentPosition.lon],16);return;}if(!navigator.geolocation){updateLocationStatus('<strong>定位無法使用</strong><br>這個瀏覽器不支援手機定位。');return;}updateLocationStatus('<strong>📡 正在取得目前位置</strong><br>取得完成後會自動移到目前位置。');navigator.geolocation.getCurrentPosition(position=>{handlePosition(position);setMapNorthUp();map.setView([currentPosition.lat,currentPosition.lon],16);},handleLocationError,{enableHighAccuracy:true,maximumAge:0,timeout:20000});}
+function updateAutoCenterTimer(){if(autoCenterTimer){clearInterval(autoCenterTimer);autoCenterTimer=null;}if(autoCenterEnabled)autoCenterTimer=setInterval(()=>centerOnCurrentLocation(),10000);}
+function toggleAutoCenter(){autoCenterEnabled=!autoCenterEnabled;localStorage.setItem(AUTO_CENTER_ENABLED_KEY,String(autoCenterEnabled));if(autoCenterEnabled)centerOnCurrentLocation();updateAutoCenterTimer();updateToggleButton();}
 async function keepScreenAwake(){if(document.hidden||screenWakeLock||!('wakeLock' in navigator))return;try{screenWakeLock=await navigator.wakeLock.request('screen');screenWakeLock.addEventListener('release',()=>{screenWakeLock=null;});}catch{screenWakeLock=null;}}
-function centerOnCurrentLocation(){if(currentPosition){map.setView([currentPosition.lat,currentPosition.lon],16);return;}if(!navigator.geolocation){updateLocationStatus('<strong>定位無法使用</strong><br>這個瀏覽器不支援手機定位。');return;}updateLocationStatus('<strong>📡 正在取得目前位置</strong><br>取得完成後會自動移到目前位置。');navigator.geolocation.getCurrentPosition(position=>{handlePosition(position);map.setView([currentPosition.lat,currentPosition.lon],16);},handleLocationError,{enableHighAccuracy:true,maximumAge:0,timeout:20000});}
 function deleteRouteRecord(id){routeRecords=routeRecords.filter(r=>r.id!==id);saveRecords();render();}
 function clearRouteRecords(){if(!routeRecords.length)return;if(!confirm(`要清除本次 ${routeRecords.length} 筆軌跡嗎？未儲存的資料將無法回復。`))return;routeRecords=[];viewingHistoryId=null;saveRecords();render();}
 function archiveCurrentRoute(){if(!routeRecords.length){alert('本次尚無軌跡可儲存。');return;}const savedAt=new Date().toISOString();if(!confirm(`要儲存這次的 ${routeRecords.length} 筆軌跡，並清空本次航程嗎？`))return;routeHistory.unshift({id:`history_${Date.now()}_${Math.random().toString(36).slice(2,7)}`,savedAt,records:routeRecords});try{saveHistory();routeRecords=[];viewingHistoryId=null;trackRecording=false;trackStartedAt=null;if(trackTimer){clearInterval(trackTimer);trackTimer=null;}saveRecords();render();alert(`已儲存：${formatTime(savedAt)}`);}catch{routeHistory.shift();alert('儲存空間不足，未清空本次軌跡。');}}
 function viewHistory(id){if(!routeHistory.some(s=>s.id===id))return;viewingHistoryId=id;render();const records=getDisplayedRecords();if(records.length){map.fitBounds(L.latLngBounds(records.map(r=>[r.lat,r.lon])),{padding:[28,28],maxZoom:16});}}
 function editHistoryNote(id){const session=routeHistory.find(s=>s.id===id);if(!session)return;const note=prompt(`為 ${formatTime(session.savedAt)} 的航程新增備註：`,session.note||'');if(note===null)return;session.note=note.trim();saveHistory();renderHistoryList();}
 function deleteHistory(id){const session=routeHistory.find(s=>s.id===id);if(!session||!confirm(`要刪除 ${formatTime(session.savedAt)} 的歷史軌跡嗎？`))return;routeHistory=routeHistory.filter(s=>s.id!==id);if(viewingHistoryId===id)viewingHistoryId=null;saveHistory();render();}
-loadRecords();loadHistory();loadSettings();initMap();render();updateToggleButton();startLocationTracking();keepScreenAwake();
+loadRecords();loadHistory();loadSettings();initMap();render();updateToggleButton();updateAutoCenterTimer();startLocationTracking();keepScreenAwake();
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){if(watchId===null)startLocationTracking();keepScreenAwake();}});
 </script>
 </body>
